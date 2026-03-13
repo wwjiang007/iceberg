@@ -76,16 +76,14 @@ class RESTTableScan extends DataTableScan {
   private final RESTClient client;
   private final Map<String, String> headers;
   private final TableOperations operations;
-  private final Table table;
   private final ResourcePaths resourcePaths;
   private final TableIdentifier tableIdentifier;
   private final Set<Endpoint> supportedEndpoints;
   private final ParserContext parserContext;
   private final Map<String, String> catalogProperties;
   private final Object hadoopConf;
-  private final FileIO tableIO;
   private String planId = null;
-  private FileIO fileIOForPlanId = null;
+  private FileIO scanFileIO = null;
 
   RESTTableScan(
       Table table,
@@ -97,11 +95,9 @@ class RESTTableScan extends DataTableScan {
       TableIdentifier tableIdentifier,
       ResourcePaths resourcePaths,
       Set<Endpoint> supportedEndpoints,
-      FileIO tableIO,
       Map<String, String> catalogProperties,
       Object hadoopConf) {
     super(table, schema, context);
-    this.table = table;
     this.client = client;
     this.headers = headers;
     this.operations = operations;
@@ -113,7 +109,6 @@ class RESTTableScan extends DataTableScan {
             .add("specsById", table.specs())
             .add("caseSensitive", context().caseSensitive())
             .build();
-    this.tableIO = tableIO;
     this.catalogProperties = catalogProperties;
     this.hadoopConf = hadoopConf;
   }
@@ -131,14 +126,15 @@ class RESTTableScan extends DataTableScan {
         tableIdentifier,
         resourcePaths,
         supportedEndpoints,
-        io(),
         catalogProperties,
         hadoopConf);
   }
 
   @Override
-  protected FileIO io() {
-    return null != fileIOForPlanId ? fileIOForPlanId : tableIO;
+  public FileIO io() {
+    Preconditions.checkState(
+        null != scanFileIO, "FileIO is not available: planFiles() must be called first");
+    return scanFileIO;
   }
 
   @Override
@@ -170,7 +166,7 @@ class RESTTableScan extends DataTableScan {
           .withEndSnapshotId(endSnapshotId)
           .withUseSnapshotSchema(true);
     } else if (snapshotId != null) {
-      boolean useSnapShotSchema = snapshotId != table.currentSnapshot().snapshotId();
+      boolean useSnapShotSchema = snapshotId != table().currentSnapshot().snapshotId();
       builder.withSnapshotId(snapshotId).withUseSnapshotSchema(useSnapShotSchema);
     }
 
@@ -190,9 +186,8 @@ class RESTTableScan extends DataTableScan {
 
     this.planId = response.planId();
     PlanStatus planStatus = response.planStatus();
-    if (null != planId && !response.credentials().isEmpty()) {
-      this.fileIOForPlanId = fileIOForPlanId(response.credentials());
-    }
+    this.scanFileIO =
+        !response.credentials().isEmpty() ? scanFileIO(response.credentials()) : table().io();
 
     switch (planStatus) {
       case COMPLETED:
@@ -212,14 +207,18 @@ class RESTTableScan extends DataTableScan {
     }
   }
 
-  private FileIO fileIOForPlanId(List<Credential> storageCredentials) {
+  private FileIO scanFileIO(List<Credential> storageCredentials) {
+    ImmutableMap.Builder<String, String> builder =
+        ImmutableMap.<String, String>builder().putAll(catalogProperties);
+    if (null != planId) {
+      builder.put(RESTCatalogProperties.REST_SCAN_PLAN_ID, planId);
+    }
+
+    Map<String, String> properties = builder.buildKeepingLast();
     FileIO ioForScan =
         CatalogUtil.loadFileIO(
             catalogProperties.getOrDefault(CatalogProperties.FILE_IO_IMPL, DEFAULT_FILE_IO_IMPL),
-            ImmutableMap.<String, String>builder()
-                .putAll(catalogProperties)
-                .put(RESTCatalogProperties.REST_SCAN_PLAN_ID, planId)
-                .buildKeepingLast(),
+            properties,
             hadoopConf,
             storageCredentials.stream()
                 .map(c -> StorageCredential.create(c.prefix(), c.config()))
@@ -275,9 +274,8 @@ class RESTTableScan extends DataTableScan {
           response.planStatus(),
           planId);
 
-      if (!response.credentials().isEmpty()) {
-        this.fileIOForPlanId = fileIOForPlanId(response.credentials());
-      }
+      this.scanFileIO =
+          !response.credentials().isEmpty() ? scanFileIO(response.credentials()) : table().io();
 
       return scanTasksIterable(response.planTasks(), response.fileScanTasks());
     } catch (FailsafeException e) {
@@ -319,10 +317,8 @@ class RESTTableScan extends DataTableScan {
   /** Cancels the plan on the server (if supported) and closes the plan-scoped FileIO */
   private void cleanupPlanResources() {
     cancelPlan();
-    if (null != fileIOForPlanId) {
-      FILEIO_TRACKER.invalidate(this);
-      this.fileIOForPlanId = null;
-    }
+    FILEIO_TRACKER.invalidate(this);
+    this.scanFileIO = null;
   }
 
   @VisibleForTesting
