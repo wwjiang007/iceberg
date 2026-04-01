@@ -18,17 +18,17 @@
  */
 package org.apache.iceberg;
 
-/** Content type stored in a file. */
-public enum FileContent {
-  DATA(0),
-  POSITION_DELETES(1),
-  EQUALITY_DELETES(2),
-  DATA_MANIFEST(3),
-  DELETE_MANIFEST(4);
+/** Status of an entry in a manifest file. */
+enum EntryStatus {
+  EXISTING(0),
+  ADDED(1),
+  DELETED(2),
+  /** Indicates an entry that has been replaced by a column update or DV change. Added in v4. */
+  REPLACED(3);
 
   private final int id;
 
-  FileContent(int id) {
+  EntryStatus(int id) {
     this.id = id;
   }
 
